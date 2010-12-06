@@ -2,6 +2,7 @@ module(..., package.seeall)
 local alpm = require "lualpm"
 local lfs = require "lfs"
 local utilcore = require "clydelib.utilcore"
+local signal = require "clydelib.signal"
 local C = colorize
 local g = utilcore.gettext
 
@@ -84,7 +85,7 @@ end
 
 function cleanup(ret)
     if (alpm.release() == -1) then
-        lprintf("LOG_ERROR", alpm.strerrorlast())
+        lprintf("LOG_ERROR", alpm.strerrorlast() .. "\n")
     end
     if (type(config.configfile) == "userdata") then
         config.configfile:close()
@@ -229,6 +230,24 @@ end
 function eprintf(level, format, ...)
     local ret = vfprintf("stderr", level, format, ...)
     return ret
+end
+
+function trans_init(flags)
+    local callback = require "clydelib.callback"
+
+    local ret  = alpm.trans_init { flags      = flags,
+                                   eventscb   = callback.cb_trans_event,
+                                   convcb     = callback.cb_trans_conv,
+                                   progresscb = callback.cb_trans_progress }
+    if (ret == -1) then
+        eprintf("LOG_ERROR", g("failed to init transaction (%s)\n"), alpm.strerrorlast())
+        if (alpm.pm_errno() == "P_E_HANDLE_LOCK") then
+            io.stderr:write(string.format(g("  if you're sure a package manager is not already\n"..
+                  "  running, you can remove %s\n"), alpm.option_get_lockfile()))
+        end
+        return -1
+    end
+    return 0
 end
 
 function trans_release()
@@ -485,39 +504,37 @@ function display_optdepends(pkg)
 end
 
 local function question(preset, fmt, ...)
+    -- get single-character input
     local stream
 
-    if (config.noconfirm) then
-        stream = "stdout"
-    else
-        stream = "stderr"
-    end
-
     local str = string.format(fmt, ...)
-    fprintf(stream, fmt, ...)
-
-    if (preset) then
-        fprintf(stream, " %s ", g("[Y/n]"))
+    if ( preset ) then
+        str = str .. " [Y/n] "
     else
-        fprintf(stream, " %s ", g("[y/N]"))
+        str = str .. " [y/N] "
     end
 
     if (config.noconfirm) then
-        fprintf(stream, "\n")
+        io.stderr:write( str )
+        if ( preset ) then io.stderr:write( "Y\n" )
+        else io.stderr:write( "N\n" ) end
         return preset
     end
 
-    local answer = io.stdin:read() or ""
+    while ( true ) do
+        io.write( str )
+        local answer = string.upper( utilcore.getchar())
 
-    if (#answer == 0) then
-        return preset
+        if (answer == "\n") then return preset end
+        print() -- print newline if the user didn't
+
+        if answer == "Y" then return true
+        elseif answer == "N" then return false
+        end
+
+        print( "Please answer 'Y', 'N', or ENTER." )
     end
 
-    if ((not strcasecmp(answer, g("Y"))) or (not strcasecmp(answer, g("YES")))) then
-        return true
-    elseif ((not strcasecmp(answer, g("N"))) or (not strcasecmp(answer, g("NO")))) then
-        return false
-    end
     return false
 end
 

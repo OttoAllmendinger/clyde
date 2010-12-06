@@ -7,7 +7,6 @@ local C = colorize
 local util = require "clydelib.util"
 local utilcore = require "clydelib.utilcore"
 local packages = require "clydelib.packages"
-local transinit = require "clydelib.transinit"
 local aur = require "clydelib.aur"
 local upgrade = require "clydelib.upgrade"
 local callback = require "clydelib.callback"
@@ -29,7 +28,7 @@ local fastremove = util.fastremove
 local tblremovedupes = util.tblremovedupes
 local tbldiff = util.tbldiff
 local tblstrdup = util.tblstrdup
-local trans_init = transinit.trans_init
+local trans_init = util.trans_init
 local yesno = util.yesno
 local noyes = util.noyes
 local trans_release = util.trans_release
@@ -52,7 +51,7 @@ require "socket"
 local http = require "socket.http"
 local url = require "socket.url"
 local ltn12 = require "ltn12"
-local aururl = "http://aur.archlinux.org/rpc.php?"
+local aururl = "https://aur.archlinux.org:443/rpc.php?"
 local aurmethod = {
     ['search'] = "type=search&";
     ['info'] = "type=info&";
@@ -455,14 +454,57 @@ function sync_search(syncs, targets, shownumbers, install)
     end
 
     if (shownumbers and found) then
-        printf("%s  %s\n%s  %s\n%s ", C.yelb("==>"),
-            C.bright("Enter #'s (separated by blanks) of packages to be installed"), C.yelb("==>"),
-            C.bright(("-"):rep(60)), C.yelb("==>"), C.yelb("==>"))
+        bars = C.yelb("==>")
+        printf("%s %s\n%s %s\n",
+               bars,
+               C.bright("Enter #'s (separated by blanks) of packages "
+                        .. "to be installed"),
+               bars, C.bright(("-"):rep(60)), bars )
 
-        local installstring = io.read("*l")
-        local installtbl = strsplit(installstring or "", " ")
-        for i, num in ipairs(installtbl) do
-            tblinsert(install, pkgnames[tonumber(num)])
+        local function ask_package_nums ( maxnum )
+            io.write( bars .. " " )
+            local nums_choice = io.read()
+
+            if nums_choice == "" then return nil end
+
+            input_numbers = {}
+            for num in nums_choice:gmatch( "(%S+)" ) do
+                if num:match( "%D" ) then
+                    error( "Invalid input", 0 )
+                else
+                    num = tonumber( num )
+                    if ( num < 1 or num > maxnum ) then
+                        error( "Out of range", 0 )
+                    end
+                    table.insert( input_numbers, num )
+                end
+            end
+
+            return input_numbers
+        end
+
+        local max = table.maxn( pkgnames )
+        while ( true ) do
+            local success, answer
+                = pcall( ask_package_nums, max )
+
+            if ( success ) then
+                if ( answer ) then
+                    for i, num in ipairs( answer ) do
+                        table.insert( install, pkgnames[num] )
+                    end
+                else
+                    print( "Aborting." )
+                end
+                break
+            elseif ( answer == "Invalid input" ) then
+                print( "Please enter only digits and/or whitespace." )
+            elseif ( answer == "Out of range" ) then
+                print( "Package numbers must be between 1 and "
+                       .. max .. "." )
+            else
+                error( answer, 0 )
+            end
         end
     end
     if found then
@@ -889,7 +931,7 @@ local function download_extract(target, currentdir)
     local user = util.getbuilduser()
     local myuid = utilcore.geteuid()
     --local oldmask = utilcore.umask(tonumber("700", 8))
-    local host = "aur.archlinux.org"
+    local host = "aur.archlinux.org:443"
     aur.get(host, string.format("/packages/%s/%s.tar.gz", target, target), user)
     aur.dispatcher()
     --utilcore.umask(oldmask)
@@ -1040,7 +1082,7 @@ local function getdepends(target, provided)
         end
     end
     local pkgbuildurl = string.format(
-            "http://aur.archlinux.org/packages/%s/%s/PKGBUILD",
+            "https://aur.archlinux.org:443/packages/%s/%s/PKGBUILD",
                 target, target)
     local pkgbuild = aur.getgzip(pkgbuildurl)
     if not pkgbuild then
@@ -1184,7 +1226,10 @@ local function aur_install(targets)
 
     getalldeps(targets, needs, needsdeps, caninstall, provided)
 
-    config.flagsdupe = tblstrdup(config.flags)
+    tflags = {}
+    for flag, status in pairs( config.flags ) do
+        if status then tflags[flag] = true end
+    end
 
     local installed = 0
     local pacmanpkgs = {}
@@ -1201,9 +1246,8 @@ local function aur_install(targets)
     end
 
     for i, pkg in ipairs(pacmanpkgs) do
-        if (tblisin(targets, pkg)) and not tblisin(config.flagsdupe, "T_F_ALLDEPS")
-                or (tblisin(config.flagsdupe, "T_F_ALLEXPLICIT")
-                    and not (tblisin(config.flagsdupe, "T_F_ALLDEPS"))) then
+        if (tblisin(targets, pkg) and not tflags["alldeps"]
+            or (tflags["allexplicit"] and not tflags["alldeps"])) then
             tblinsert(pacmanexplicit, pkg)
         else
             tblinsert(pacmandeps, pkg)
@@ -1212,9 +1256,9 @@ local function aur_install(targets)
 
     config.noconfirm = true
     sync_aur_trans(pacmanexplicit)
-    tblinsert(config.flags, "T_F_ALLDEPS")
+    config.flags["alldeps"] = true
     sync_aur_trans(pacmandeps)
-    removeflags("T_F_ALLDEPS")
+    config.flags["alldeps"] = false
     config.noconfirm = noconfirm
 
     local installedtbl = {}
@@ -1227,9 +1271,8 @@ local function aur_install(targets)
 
         for i, pkg in ipairs(aurpkgs) do
             if (tblisin(caninstall, pkg) and not tblisin(installedtbl, pkg)) then
-                if (tblisin(targets, pkg) and not tblisin(config.flagsdupe, "T_F_ALLDEPS")
-                    or (tblisin(config.flagsdupe, "T_F_ALLEXPLICIT")
-                        and not (tblisin(config.flagsdupe, "T_F_ALLDEPS")))) then
+                if (tblisin(targets, pkg) and not tflags["alldeps"])
+                    or (tflags["allexplicit"] and not tflags["alldeps"]) then
                     download_extract(pkg)
                     customizepkg(pkg)
                     makepkg(pkg, mkpkgopts)
@@ -1237,12 +1280,12 @@ local function aur_install(targets)
                     installed = installed + 1
                     tblinsert(installedtbl, pkg)
                 else
-                    tblinsert(config.flags, "T_F_ALLDEPS")
+                    config.flags["alldeps"] = true
                     download_extract(pkg)
                     customizepkg(pkg)
                     makepkg(pkg, mkpkgopts)
                     installpkgs(pkg)
-                    removeflags("T_F_ALLDEPS")
+                    config.flags["alldeps"] = false
                     installed = installed + 1
                     tblinsert(installedtbl, pkg)
                 end
@@ -1545,7 +1588,7 @@ local function sync_trans(targets)
 end
 
 local function clyde_sync(targets)
-    if (tblisin(config.flags, "T_F_DOWNLOADONLY") or config.op_s_printuris) then
+    if (config.flags["downloadonly"] or config.op_s_printuris) then
         local isin, int = tblisin(config.logmask, "LOG_WARNING")
         if (isin) then
             fastremove(config.logmask, int)
@@ -1613,7 +1656,7 @@ local function clyde_sync(targets)
 
     local targs = tblstrdup(targets)
 
-    if ((not tblisin(config.flags, "T_F_DOWNLOADONLY")) and (not config.op_s_printuris)) then
+    if (not config.flags["downloadonly"] and (not config.op_s_printuris)) then
         local packages = syncfirst()
         if (next(packages)) then
             local tmp = tbldiff(targets, packages)

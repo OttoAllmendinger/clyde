@@ -14,6 +14,7 @@
 #include <sys/utsname.h>
 #include <sys/prctl.h> /* for setprocname */
 
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -25,6 +26,7 @@
 #include <unistd.h> /* isatty, getuid */
 #include <limits.h>
 #include <wchar.h>
+#include <termios.h>
 
 //#define _XOPEN_SOURCE
 extern int errno;
@@ -200,22 +202,113 @@ static int clyde_arch(lua_State *L)
     return 1;
 }
 
+static void throw_errno ( lua_State *L, const char * funcname )
+{
+    lua_pushfstring( L, "%s: %s", funcname, strerror( errno ));
+    lua_error( L );
+    return;
+}
+
+/* A semicolon is required at the end */
+#define CHECK_ERR( FUNCNAME, FUNCCALL ) \
+    if ( FUNCCALL == -1 ) throw_errno( L, FUNCNAME )
+
 /* Sets the effective procedure name, to change the terminal's title. */
 static int clyde_setprocname ( lua_State *L )
 {
     const char *procname;
-    int retval;
     
     procname = luaL_checkstring( L, 1 );
-    retval   = prctl( PR_SET_NAME, procname, 0, 0, 0 );
-
-    if ( retval == -1 ) {
-        lua_pushstring( L, strerror( errno ));
-        lua_error( L );
-    }
+    CHECK_ERR( "prctl", prctl( PR_SET_NAME, procname, 0, 0, 0 ));
     
     return 0;
 }
+
+#define STDIN 0
+
+/* Save our old termio struct for the signal handler. */
+struct termios Old_termio;
+struct sigaction Old_signals[2];
+
+/* This is just here to avoid copy/paste code. */
+static int restore_termio ( void )
+{
+    return tcsetattr( STDIN, TCSANOW, &Old_termio );
+}
+
+static void sig_restore_termio ( int signal )
+{
+    int i;
+
+    restore_termio();
+
+    /* Call lua-signal's old signal handler. */
+    switch ( signal ) {
+    case SIGINT : i = 0; break;
+    case SIGTERM: i = 1; break;
+    default: return;
+    }
+
+    /* Make sure it exists first. */
+    if ( ( Old_signals+i )->sa_handler != NULL ) {
+        (( Old_signals+i )->sa_handler )( signal );
+    }
+
+    return;
+}
+
+static int clyde_getchar ( lua_State *L ) {
+    struct sigaction new_signal;
+    struct termios new_termio;
+    char input;
+
+    if ( isatty( STDIN ) == 0 ) {
+        /* The rest won't work if we aren't a real terminal. */
+        input = getchar();
+        lua_pushlstring( L, &input, 1 );
+        return 1;
+    }
+
+    /* XXX: This sets the terminal, etc, even if it is already
+       set to non-canonical mode. Lazy? Who cares? */
+
+    CHECK_ERR( "tcgetattr", tcgetattr( STDIN, &Old_termio ));
+    memcpy( &new_termio, &Old_termio, sizeof( struct termios ));
+
+    /* Turn off canonical mode, meaning read one char at a time.
+       Set timer to 0, to wait forever. Minimum chars is 1. */
+    new_termio.c_lflag      &= ~ICANON;
+    new_termio.c_cc[ VTIME ] = 0;
+    new_termio.c_cc[ VMIN  ] = 1;
+    CHECK_ERR( "tcsetattr", tcsetattr( STDIN, TCSANOW, &new_termio ));
+
+    /* We should confirm it worked, according to the manpage. */
+    CHECK_ERR( "tcgetattr", tcgetattr( STDIN, &new_termio ));
+    if ( new_termio.c_lflag & ICANON
+         || new_termio.c_cc[ VTIME ] != 0
+         || new_termio.c_cc[ VMIN  ] != 1 ) {
+        lua_pushstring( L, "Failed to set character read mode for terminal" );
+        lua_error( L );
+    }
+
+    /* Create our own signal handler. Store old signal handler. */
+    memset( &new_signal, 0, sizeof( struct sigaction ));
+    new_signal.sa_handler = sig_restore_termio;
+    CHECK_ERR( "sigaction", sigaction( SIGINT,  &new_signal, Old_signals+0 ));
+    CHECK_ERR( "sigaction", sigaction( SIGTERM, &new_signal, Old_signals+1 ));
+    /* XXX: Should we handle more signals? */
+
+    input = getchar();
+    lua_pushlstring( L, &input, 1 );
+
+    /* Restore old signal handlers and terminal IO setup. */
+    CHECK_ERR( "sigaction", sigaction( SIGINT,  Old_signals+0, NULL ));
+    CHECK_ERR( "sigaction", sigaction( SIGTERM, Old_signals+1, NULL ));
+    CHECK_ERR( "tcsetattr", restore_termio() );
+
+    return 1;
+}
+
 
 static luaL_Reg const pkg_funcs[] = {
     { "bindtextdomain",             clyde_bindtextdomain },
@@ -230,6 +323,7 @@ static luaL_Reg const pkg_funcs[] = {
     { "mkdir",                      clyde_mkdir },
     { "umask",                      clyde_umask },
     { "arch",                       clyde_arch },
+    { "getchar",                    clyde_getchar },
     { "setprocname",                clyde_setprocname },
     { NULL,                         NULL}
 };

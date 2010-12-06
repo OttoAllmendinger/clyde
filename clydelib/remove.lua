@@ -2,7 +2,6 @@ module(..., package.seeall)
 local lfs = require "lfs"
 local alpm = require "lualpm"
 local util = require "clydelib.util"
-local transinit = require "clydelib.transinit"
 local utilcore = require "clydelib.utilcore"
 local packages = require "clydelib.packages"
 local eprintf = util.eprintf
@@ -21,7 +20,7 @@ local fastremove = util.fastremove
 local tblremovedupes = util.tblremovedupes
 local tbldiff = util.tbldiff
 local tblstrdup = util.tblstrdup
-local trans_init = transinit.trans_init
+local trans_init = util.trans_init
 local yesno = util.yesno
 local noyes = util.noyes
 local trans_release = util.trans_release
@@ -125,7 +124,7 @@ local function clyde_remove(targets)
         return removecleanup()
     end
 
-    if (tblisin(config.flags, "T_F_RECURSE") or tblisin(config.flags, "T_F_CASCADE")) then
+    if (config.flags["recurse"] or config.flags["cascade"]) then
         local pkglist = alpm.trans_get_remove()
         display_targets(pkglist, false)
         printf("\n")
